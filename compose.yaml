@@ -1,0 +1,13 @@
+services:
+  web:
+    image: odoo:19.0
+    ports:
+      - "8069:8069"
+    volumes:
+      - odoo-web-data:/var/lib/odoo
+      - ./config:/etc/odoo
+      - ./addons/accounting_suite:/mnt/extra-addons/accounting_suite
+      - ./addons/themes:/mnt/extra-addons/themes
+
+volumes:
+  odoo-web-data:
