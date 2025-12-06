@@ -1,0 +1,72 @@
+name: Odoo CI/CD Deploy with Backup & Rollback
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # Step 2: Detect changed modules
+      - name: Detect changed modules
+        id: changes
+        run: |
+          CHANGED_MODULES=$(git diff --name-only ${{ github.sha }} ${{ github.event.before }} \
+            | grep '^addons/accounting_suite/' \
+            | cut -d'/' -f3 \
+            | sort -u \
+            | tr '\n' ',' \
+            | sed 's/,$//')
+          echo "CHANGED_MODULES=$CHANGED_MODULES" >> $GITHUB_ENV
+          echo "Changed modules: $CHANGED_MODULES"
+
+      # Step 3: Skip deployment if no module changed
+      - name: Skip if no module changes
+        if: env.CHANGED_MODULES == ''
+        run: echo "No module changes detected. Skipping deployment."
+
+      # Step 4: SSH into server and deploy
+      - name: Deploy to server with rollback
+        if: env.CHANGED_MODULES != ''
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            set -e  # stop script on error
+
+            cd /opt/odoo
+
+            # Pull latest code
+            git pull origin master
+
+            # Create backup
+            BACKUP_DIR="/opt/odoo/backups"
+            mkdir -p $BACKUP_DIR
+            BACKUP_FILE="$BACKUP_DIR/odoo19_$(date +'%Y%m%d%H%M%S').sql"
+            echo "Backing up database to $BACKUP_FILE..."
+            docker exec -t odoo-db-1 pg_dump -U odoo odoo19 > $BACKUP_FILE
+
+            # Restart web container
+            docker compose restart web
+
+            # Upgrade changed modules
+            echo "Upgrading modules: $CHANGED_MODULES"
+            for module in $(echo $CHANGED_MODULES | tr ',' ' '); do
+              echo "Upgrading $module..."
+              docker exec odoo-web-1 odoo -u $module -d odoo19 || {
+                echo "Module upgrade failed! Restoring database from backup..."
+                docker exec -i odoo-db-1 psql -U odoo odoo19 < $BACKUP_FILE
+                echo "Rollback completed."
+                exit 1
+              }
+            done
+
+            echo "Deployment completed successfully!"
